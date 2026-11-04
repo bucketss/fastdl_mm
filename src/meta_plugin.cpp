@@ -16,6 +16,7 @@
 #include "config.h"
 #include "config_parser.h"
 #include "fastdl_server.h"
+#include "public_address.h"
 
 #include <algorithm>
 #include <cctype>
@@ -50,6 +51,7 @@ std::filesystem::path g_configPath;
 std::string g_checkedUrl;
 float g_urlCheckAt = 0.0f;
 bool g_urlCheckChangedOnly = false;
+std::string g_autoUrl;
 
 cvar_t cvarEnabled = {"fastdl_enabled", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarBind = {"fastdl_bind", "0.0.0.0", FCVAR_SERVER, 0.0f, nullptr};
@@ -68,6 +70,7 @@ cvar_t cvarDenials = {"fastdl_denials_minute", "36", FCVAR_SERVER, 0.0f, nullptr
 cvar_t cvarBlockSeconds = {"fastdl_block_seconds", "180", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarLog = {"fastdl_log", "logs/fastdl/fastdl.log", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarLogAge = {"fastdl_log_age", "7", FCVAR_SERVER, 0.0f, nullptr};
+cvar_t cvarAutoUrl = {"fastdl_autourl", "0", FCVAR_SERVER, 0.0f, nullptr};
 
 // Registration order, and the order a generated config is written in. The help
 // text is only used for the comment block in a generated config.
@@ -90,7 +93,8 @@ const Setting g_settings[] = {
     {&cvarDenials,      "denials per minute before a temporary block"},
     {&cvarBlockSeconds, "how long a block lasts, in seconds"},
     {&cvarLog,          "log base path; one file per day"},
-    {&cvarLogAge,       "days of logs to keep, 0 keeps all"}
+    {&cvarLogAge,       "days of logs to keep, 0 keeps all"},
+    {&cvarAutoUrl,      "set an empty sv_downloadurl from this machine's public IPv4"}
 };
 
 unsigned int boundedUnsigned(const char* name, unsigned int minimum, unsigned int maximum) {
@@ -250,6 +254,65 @@ void checkDownloadUrl() {
     for (const auto& problem : problems) print("WARNING: " + problem);
 }
 
+bool explicitAddress(const std::string& text, const char* name,
+    std::string& address, std::string& why) {
+    std::uint32_t value = 0;
+    if (!parseIpv4(text, value) || value == 0) return false;
+    if (publicIpv4(value)) {
+        address = formatIpv4(value);
+    } else {
+        why = std::string(name) + " is " + text + ", a private address";
+    }
+    return true;
+}
+
+bool autoUrlAddress(std::string& address, std::string& why) {
+    if (explicitAddress(g_engfuncs.pfnCVarGetString("ip"), "ip", address, why) ||
+        explicitAddress(g_server.config().bindAddress, "fastdl_bind", address, why)) {
+        return !address.empty();
+    }
+    const auto found = localPublicIpv4();
+    if (found.size() == 1) {
+        address = found.front();
+        return true;
+    }
+    if (found.empty()) {
+        why = "no public IPv4 address on this machine";
+    } else {
+        why = "several public IPv4 addresses (";
+        for (std::size_t i = 0; i < found.size(); ++i) {
+            why += (i ? ", " : "") + found[i];
+        }
+        why += "), set ip or sv_downloadurl";
+    }
+    return false;
+}
+
+void applyAutoUrl(bool report) {
+    if (g_engfuncs.pfnCVarGetFloat("fastdl_autourl") == 0.0f) return;
+    const std::string current = g_engfuncs.pfnCVarGetString("sv_downloadurl");
+    if (!current.empty() && current != g_autoUrl) return;
+    std::string address;
+    std::string why;
+    if (!autoUrlAddress(address, why)) {
+        if (report) print("fastdl_autourl: " + why);
+        return;
+    }
+    const auto url = "http://" + address + ":" + std::to_string(g_server.config().port) + "/";
+    if (url == current) return;
+    g_engfuncs.pfnCVarSetString("sv_downloadurl", url.c_str());
+    g_autoUrl = url;
+    print("fastdl_autourl set sv_downloadurl to " + url);
+}
+
+void clearAutoUrl() {
+    if (!g_autoUrl.empty() && g_autoUrl == g_engfuncs.pfnCVarGetString("sv_downloadurl")) {
+        g_engfuncs.pfnCVarSetString("sv_downloadurl", "");
+        print("fastdl_autourl cleared sv_downloadurl");
+    }
+    g_autoUrl.clear();
+}
+
 void printLogState() {
     if (!g_server.logging()) {
         print("NOT logging: could not open " + g_server.logPath().u8string() +
@@ -267,12 +330,14 @@ void startServer() {
     if (!config.enabled) {
         g_server.stop();
         print("disabled");
+        clearAutoUrl();
         warnIfDownloadUrlSet();
         return;
     }
     std::string error;
     if (!g_server.start(config, error)) {
         print("start failed: " + error);
+        clearAutoUrl();
         warnIfDownloadUrlSet();
         return;
     }
@@ -393,7 +458,7 @@ bool loadConfigFile(const std::filesystem::path& path, unsigned int& loaded,
         "fastdl_max_file_mb", "fastdl_threads",
         "fastdl_max_connections_ip", "fastdl_requests_minute",
         "fastdl_denials_minute", "fastdl_block_seconds", "fastdl_log",
-        "fastdl_log_age"
+        "fastdl_log_age", "fastdl_autourl"
     };
 
     std::ifstream configFile(path);
@@ -490,6 +555,7 @@ void startFrame() {
     }
     if (g_urlCheckAt > 0.0f && gpGlobals->time >= g_urlCheckAt) {
         g_urlCheckAt = 0.0f;
+        if (g_server.running()) applyAutoUrl(!g_urlCheckChangedOnly);
         if (g_server.running() &&
             (!g_urlCheckChangedOnly ||
                 g_engfuncs.pfnCVarGetString("sv_downloadurl") != g_checkedUrl)) {

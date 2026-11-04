@@ -101,6 +101,7 @@ fastdl_max_file_mb       "250"
 fastdl_threads           "1"
 fastdl_log               "logs/fastdl/fastdl.log"
 fastdl_log_age           "7"
+fastdl_autourl           "0"
 ```
 
 `fastdl_restart` reloads `fastdl_mm.cfg` and restarts the HTTP server without restarting HLDS.
@@ -121,6 +122,9 @@ fastdl_unblock <ip>
 * `.wad` files directly in `fastdl_root` are also served if `wad` is in `fastdl_serve_types`.
 * File names are matched case-insensitively on Linux too.
 * `sv_downloadurl` is checked against the fastdl port on start, on map change and in `fastdl_status`.
+* `fastdl_autourl "1"` sets an empty `sv_downloadurl` to `http://<ip>:<fastdl port>/`, using the `ip` cvar,
+  `fastdl_bind`, or the machine's only public IPv4 address. Private addresses are never used.
+  Only enable it if the fastdl TCP port is reachable from outside; otherwise clients stall on every file.
 
 ## Gzip
 

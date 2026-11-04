@@ -12,6 +12,7 @@
 #include "fastdl_server.h"
 #include "logger.h"
 #include "path_resolver.h"
+#include "public_address.h"
 #include "rate_limiter.h"
 
 #include <array>
@@ -252,6 +253,29 @@ int main() {
     check(resolver.resolve("/maps/Dup.bsp", 1024).status == ResolveStatus::NotFound,
         "ambiguous case variants do not resolve");
 #endif
+
+    {
+        std::uint32_t address = 0;
+        for (const char* text : {"0.1.2.3", "10.0.0.69", "100.64.0.1", "100.127.255.255",
+                 "127.0.0.1", "169.254.1.1", "172.16.0.1", "172.31.255.255", "192.0.0.8",
+                 "192.168.1.1", "198.18.0.1", "198.19.255.255", "224.0.0.1",
+                 "255.255.255.255"}) {
+            check(parseIpv4(text, address) && !publicIpv4(address), "private range is not public");
+        }
+        for (const char* text : {"1.1.1.1", "76.19.164.195", "100.63.255.255", "100.128.0.0",
+                 "172.15.255.255", "172.32.0.0", "192.236.189.84", "198.20.0.0",
+                 "223.255.255.255"}) {
+            check(parseIpv4(text, address) && publicIpv4(address), "public address is public");
+        }
+        check(!parseIpv4("localhost", address) && !parseIpv4("1.2.3", address) &&
+            !parseIpv4("", address), "non-addresses do not parse");
+        check(parseIpv4("192.236.189.84", address) &&
+            formatIpv4(address) == "192.236.189.84", "address round trips");
+        for (const auto& found : localPublicIpv4()) {
+            check(parseIpv4(found, address) && publicIpv4(address),
+                "interface scan returns only public addresses");
+        }
+    }
 
     // Type allowlist is driven by the list, not a hardcoded table.
     PathResolver narrow;

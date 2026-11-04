@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fastdl_mm VERSION 1.2.0 LANGUAGES C CXX)
+project(fastdl_mm VERSION 1.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,7 +74,8 @@ add_library(fastdl_mm SHARED
     src/config_parser.cpp
     src/path_resolver.cpp
     src/rate_limiter.cpp
-    src/logger.cpp)
+    src/logger.cpp
+    src/public_address.cpp)
 
 if(WIN32)
     target_sources(fastdl_mm PRIVATE src/fastdl_mm.def)
@@ -98,7 +99,7 @@ target_compile_definitions(fastdl_mm PRIVATE
 
 target_link_libraries(fastdl_mm PRIVATE microhttpd)
 if(WIN32)
-    target_link_libraries(fastdl_mm PRIVATE ws2_32)
+    target_link_libraries(fastdl_mm PRIVATE ws2_32 iphlpapi)
 endif()
 
 if(MSVC)
@@ -143,12 +144,13 @@ if(BUILD_TESTING)
         src/fastdl_server.cpp
         src/path_resolver.cpp
         src/rate_limiter.cpp
-        src/logger.cpp)
+        src/logger.cpp
+        src/public_address.cpp)
     target_include_directories(fastdl_tests PRIVATE src)
     target_link_libraries(fastdl_tests PRIVATE microhttpd)
     if(MSVC)
         target_compile_options(fastdl_tests PRIVATE /W4 /EHsc /MT$<$<CONFIG:Debug>:d>)
-        target_link_libraries(fastdl_tests PRIVATE ws2_32)
+        target_link_libraries(fastdl_tests PRIVATE ws2_32 iphlpapi)
     else()
         target_compile_options(fastdl_tests PRIVATE -Wall -Wextra)
         find_package(Threads REQUIRED)

@@ -31,6 +31,7 @@ public:
     bool configure(const std::filesystem::path& root, const std::string& dirs,
         const std::string& types, std::string& error);
     ResolvedFile resolve(const char* rawUrl, std::uint64_t maxBytes) const;
+    bool gzipVariant(const ResolvedFile& source, ResolvedFile& variant) const;
     const std::filesystem::path& root() const { return root_; }
 
     static std::vector<std::string> splitList(const std::string& value);

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <fstream>
 #include <system_error>
 #include <vector>
 
@@ -244,4 +246,41 @@ ResolvedFile PathResolver::resolve(const char* rawUrl, std::uint64_t maxBytes) c
     result.status = ResolveStatus::Ok;
     result.path = candidate;
     return result;
+}
+
+bool PathResolver::gzipVariant(const ResolvedFile& source, ResolvedFile& variant) const {
+    if (source.status != ResolveStatus::Ok) return false;
+    std::error_code ec;
+    auto gzPath = source.path;
+    gzPath += ".gz";
+    const auto candidate = std::filesystem::canonical(gzPath, ec);
+    if (ec || !containedBy(root_, candidate)) return false;
+    const std::filesystem::directory_entry entry(candidate, ec);
+    if (ec || !entry.is_regular_file(ec) || ec) return false;
+    const auto size = entry.file_size(ec);
+    if (ec || size < 18 || size >= source.size) return false;
+    const auto gzTime = entry.last_write_time(ec);
+    if (ec) return false;
+    const auto sourceTime = std::filesystem::last_write_time(source.path, ec);
+    if (ec || std::chrono::floor<std::chrono::seconds>(gzTime) !=
+            std::chrono::floor<std::chrono::seconds>(sourceTime)) {
+        return false;
+    }
+
+    std::ifstream in(candidate, std::ios::binary);
+    unsigned char trailer[4] = {};
+    if (!in.seekg(-4, std::ios::end) ||
+        !in.read(reinterpret_cast<char*>(trailer), sizeof(trailer))) {
+        return false;
+    }
+    const std::uint32_t storedSize = static_cast<std::uint32_t>(trailer[0]) |
+        (static_cast<std::uint32_t>(trailer[1]) << 8) |
+        (static_cast<std::uint32_t>(trailer[2]) << 16) |
+        (static_cast<std::uint32_t>(trailer[3]) << 24);
+    if (storedSize != static_cast<std::uint32_t>(source.size)) return false;
+
+    variant = source;
+    variant.path = candidate;
+    variant.size = size;
+    return true;
 }

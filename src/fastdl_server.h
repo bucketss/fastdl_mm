@@ -72,7 +72,9 @@ private:
     int dispatch(MHD_Connection* connection, RequestState& state);
     int respondText(MHD_Connection* connection, RequestState& state, unsigned int status,
         const char* body, const char* reason);
-    int serveFile(MHD_Connection* connection, RequestState& state, const ResolvedFile& file);
+    int serveFile(MHD_Connection* connection, RequestState& state, const ResolvedFile& file,
+        bool gzip);
+    static bool acceptsGzip(const std::string& acceptEncoding);
     int deny(MHD_Connection* connection, RequestState& state,
         const char* reason, bool strike);
     void logCompleted(const RequestState& state, MHD_RequestTerminationCode code);

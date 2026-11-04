@@ -15,7 +15,7 @@ struct FastdlConfig {
     std::filesystem::path baseDir;
     // Comma separated. "*" allows everything, empty allows nothing.
     std::string serveDirs = "sprites,sound,sounds,overviews,models,maps,gfx";
-    std::string serveTypes = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2";
+    std::string serveTypes = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,bz2";
     std::uint64_t maxFileBytes = 250ULL * 1024ULL * 1024ULL;
     unsigned int threads = 1;
     unsigned int maxConnectionsPerIp = 32;

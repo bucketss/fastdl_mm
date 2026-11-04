@@ -58,6 +58,22 @@ void touch(const std::filesystem::path& path, const std::string& contents) {
     std::ofstream(path, std::ios::binary) << contents;
 }
 
+std::string fakeGzip(std::size_t sourceSize) {
+    std::string data(20, 'z');
+    for (int i = 0; i < 4; ++i) {
+        data.push_back(static_cast<char>((sourceSize >> (8 * i)) & 0xff));
+    }
+    return data;
+}
+
+void matchTime(const std::filesystem::path& target, const std::filesystem::path& source) {
+    std::filesystem::last_write_time(target, std::filesystem::last_write_time(source));
+}
+
+bool hasHeader(const std::string& response, const std::string& line) {
+    return response.find("\r\n" + line + "\r\n") != std::string::npos;
+}
+
 #ifdef _WIN32
 using RawSocket = SOCKET;
 void closeRaw(RawSocket sock) { closesocket(sock); }
@@ -71,9 +87,10 @@ void closeRaw(RawSocket sock) { close(sock); }
 // usable came back. Everything above the socket -- libmicrohttpd's own request
 // line parser included -- is under test, which is why this cannot be done
 // through PathResolver alone.
-int rawStatus(std::uint16_t port, const std::string& requestLine) {
+std::string rawResponse(std::uint16_t port, const std::string& requestLine,
+    const std::string& extraHeaders = "") {
     const RawSocket sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == INVALID_SOCKET) return 0;
+    if (sock == INVALID_SOCKET) return {};
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -81,24 +98,27 @@ int rawStatus(std::uint16_t port, const std::string& requestLine) {
     inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
     if (::connect(sock, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
         closeRaw(sock);
-        return 0;
+        return {};
     }
 
     const std::string request = requestLine +
-        "\r\nHost: 127.0.0.1\r\nUser-Agent: Valve/Steam HTTP Client 1.0\r\n"
-        "Connection: close\r\n\r\n";
+        "\r\nHost: 127.0.0.1\r\nUser-Agent: Valve/Steam HTTP Client 1.0\r\n" +
+        extraHeaders + "Connection: close\r\n\r\n";
     ::send(sock, request.data(), static_cast<int>(request.size()), 0);
 
-    // The status line can be split across reads, so collect until end of line.
-    std::string head;
+    std::string response;
     char buffer[256];
-    while (head.find('\n') == std::string::npos && head.size() < 1024) {
+    while (response.size() < 65536) {
         const auto received = ::recv(sock, buffer, sizeof(buffer), 0);
         if (received <= 0) break;
-        head.append(buffer, static_cast<std::size_t>(received));
+        response.append(buffer, static_cast<std::size_t>(received));
     }
     closeRaw(sock);
+    return response;
+}
 
+int rawStatus(std::uint16_t port, const std::string& requestLine) {
+    const auto head = rawResponse(port, requestLine);
     const auto space = head.find(' ');
     if (head.rfind("HTTP/", 0) != 0 || space == std::string::npos) return 0;
     return std::atoi(head.c_str() + space + 1);
@@ -117,7 +137,7 @@ int main() {
     touch(root / "top.txt", "top level");
     touch(root / "custom.wad", "wad");
 
-    const std::string types = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2";
+    const std::string types = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,bz2";
 
     PathResolver resolver;
     std::string error;
@@ -129,6 +149,39 @@ int main() {
         "allow bz2");
     check(resolver.resolve("/maps/secret.dll", 1024).status ==
         ResolveStatus::ExtensionDenied, "deny executable extension");
+
+    {
+        const std::string source(100, 'a');
+        touch(root / "maps/gz.bsp", source);
+        touch(root / "maps/gz.bsp.gz", fakeGzip(source.size()));
+        matchTime(root / "maps/gz.bsp.gz", root / "maps/gz.bsp");
+        const auto file = resolver.resolve("/maps/gz.bsp", 1024);
+        ResolvedFile variant;
+        check(resolver.gzipVariant(file, variant) && variant.size == 24 &&
+            variant.extension == ".bsp", "matching gz sidecar is used");
+        check(resolver.resolve("/maps/gz.bsp.gz", 1024).status ==
+            ResolveStatus::ExtensionDenied, "gz sidecar is not served by name");
+
+        std::filesystem::last_write_time(root / "maps/gz.bsp.gz",
+            std::filesystem::last_write_time(root / "maps/gz.bsp") - std::chrono::hours(1));
+        check(!resolver.gzipVariant(file, variant), "sidecar with another mtime is ignored");
+
+        std::filesystem::last_write_time(root / "maps/gz.bsp.gz",
+            std::chrono::floor<std::chrono::seconds>(
+                std::filesystem::last_write_time(root / "maps/gz.bsp")));
+        check(resolver.gzipVariant(file, variant), "mtime is compared to the second");
+
+        touch(root / "maps/gz.bsp.gz", fakeGzip(source.size() + 1));
+        matchTime(root / "maps/gz.bsp.gz", root / "maps/gz.bsp");
+        check(!resolver.gzipVariant(file, variant), "sidecar of another size is ignored");
+
+        touch(root / "maps/gz.bsp.gz", std::string(200, 'b') + fakeGzip(source.size()));
+        matchTime(root / "maps/gz.bsp.gz", root / "maps/gz.bsp");
+        check(!resolver.gzipVariant(file, variant), "sidecar not smaller is ignored");
+
+        std::filesystem::remove(root / "maps/gz.bsp.gz", ec);
+        check(!resolver.gzipVariant(file, variant), "missing sidecar is ignored");
+    }
     check(resolver.resolve("/maps/test.bsp", 2).status == ResolveStatus::TooLarge,
         "enforce maximum file size");
     check(resolver.resolve("/../secret.bsp", 1024).status == ResolveStatus::InvalidPath,
@@ -429,14 +482,32 @@ int main() {
                 "the truncated name is still not a file");
             check(rawStatus(config.port, "GET /addons/config.txt HTTP/1.1") == 403,
                 "unserved directory is denied");
+
+            const std::string source(100, 'a');
+            touch(root / "maps/served.bsp", source);
+            touch(root / "maps/served.bsp.gz", fakeGzip(source.size()));
+            matchTime(root / "maps/served.bsp.gz", root / "maps/served.bsp");
+            const auto zipped = rawResponse(config.port, "GET /maps/served.bsp HTTP/1.1",
+                "Accept-Encoding: gzip,identity,*;q=0\r\n");
+            check(hasHeader(zipped, "Content-Encoding: gzip") &&
+                hasHeader(zipped, "Content-Length: 24"), "gzip client gets the sidecar");
+            check(hasHeader(zipped, "Vary: Accept-Encoding"), "file responses vary on encoding");
+            const auto plain = rawResponse(config.port, "GET /maps/served.bsp HTTP/1.1");
+            check(plain.find("Content-Encoding") == std::string::npos &&
+                hasHeader(plain, "Content-Length: 100"), "other clients get the original");
+            const auto refused = rawResponse(config.port, "GET /maps/served.bsp HTTP/1.1",
+                "Accept-Encoding: identity, gzip;q=0\r\n");
+            check(refused.find("Content-Encoding") == std::string::npos,
+                "gzip with q=0 gets the original");
+
             server.stop();
             const auto stats = server.stats();
-            check(stats.requests == 5, "every request is counted");
-            check(stats.served == 3, "served files are counted");
+            check(stats.requests == 8, "every request is counted");
+            check(stats.served == 6, "served files are counted");
             check(stats.notFound == 1, "misses are counted");
             check(stats.denied == 1, "denials are counted");
             check(stats.errors == 0, "no errors counted");
-            check(stats.bytesSent == 3 + 5 + 5, "sent bytes are counted");
+            check(stats.bytesSent == 3 + 5 + 5 + 24 + 100 + 100, "sent bytes are counted");
             check(stats.connections == 0, "closed connections are uncounted");
         }
     }

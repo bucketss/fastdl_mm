@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -313,16 +315,51 @@ int FastdlServer::dispatch(MHD_Connection* connection, RequestState& state) {
             return deny(connection, state, "invalid path", true);
     }
 
-    const int queued = serveFile(connection, state, file);
+    ResolvedFile body = file;
+    const bool gzip =
+        acceptsGzip(header(connection, MHD_HTTP_HEADER_ACCEPT_ENCODING)) &&
+        resolver_.gzipVariant(file, body);
+    const int queued = serveFile(connection, state, body, gzip);
     if (queued != MHD_YES) {
         return respondText(connection, state, MHD_HTTP_INTERNAL_SERVER_ERROR,
             "500 Internal Server Error\n", "open failed");
     }
     state.file = true;
     state.status = MHD_HTTP_OK;
-    state.size = file.size;
-    state.reason.clear();
+    state.size = body.size;
+    state.reason = gzip ? "gzip" : "";
     return MHD_YES;
+}
+
+bool FastdlServer::acceptsGzip(const std::string& acceptEncoding) {
+    bool wildcard = false;
+    std::size_t start = 0;
+    while (start <= acceptEncoding.size()) {
+        const auto comma = acceptEncoding.find(',', start);
+        const auto item = acceptEncoding.substr(start,
+            comma == std::string::npos ? std::string::npos : comma - start);
+        const auto semicolon = item.find(';');
+        auto coding = item.substr(0, semicolon);
+        coding.erase(0, coding.find_first_not_of(" \t"));
+        coding.erase(coding.find_last_not_of(" \t") + 1);
+        std::transform(coding.begin(), coding.end(), coding.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        double quality = 1.0;
+        if (semicolon != std::string::npos) {
+            auto params = item.substr(semicolon + 1);
+            params.erase(std::remove_if(params.begin(), params.end(),
+                [](unsigned char c) { return c == ' ' || c == '\t'; }), params.end());
+            if (params.size() >= 2 && (params[0] == 'q' || params[0] == 'Q') &&
+                params[1] == '=') {
+                quality = std::strtod(params.c_str() + 2, nullptr);
+            }
+        }
+        if (coding == "gzip" || coding == "x-gzip") return quality > 0.0;
+        if (coding == "*") wildcard = quality > 0.0;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return wildcard;
 }
 
 int FastdlServer::deny(MHD_Connection* connection, RequestState& state,
@@ -349,8 +386,8 @@ int FastdlServer::respondText(MHD_Connection* connection, RequestState& state,
     return result;
 }
 
-int FastdlServer::serveFile(
-    MHD_Connection* connection, RequestState& state, const ResolvedFile& file) {
+int FastdlServer::serveFile(MHD_Connection* connection, RequestState& state,
+    const ResolvedFile& file, bool gzip) {
 #ifdef _WIN32
     const int fd = _wopen(file.path.c_str(), _O_RDONLY | _O_BINARY | _O_NOINHERIT);
 #else
@@ -374,6 +411,8 @@ int FastdlServer::serveFile(
     }
     MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, contentType(file.extension));
     MHD_add_response_header(response, MHD_HTTP_HEADER_CACHE_CONTROL, "public, max-age=86400");
+    MHD_add_response_header(response, MHD_HTTP_HEADER_VARY, MHD_HTTP_HEADER_ACCEPT_ENCODING);
+    if (gzip) MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_ENCODING, "gzip");
     const int result = MHD_queue_response(connection, MHD_HTTP_OK, response);
     MHD_destroy_response(response);
     return result;

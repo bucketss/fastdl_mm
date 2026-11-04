@@ -58,7 +58,7 @@ cvar_t cvarRoot = {"fastdl_root", "cstrike", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarServeDirs = {"fastdl_serve_dirs",
     "sprites,sound,sounds,overviews,models,maps,gfx", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarServeTypes = {"fastdl_serve_types",
-    "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2",
+    "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,bz2",
     FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarMaxFileMb = {"fastdl_max_file_mb", "250", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarThreads = {"fastdl_threads", "1", FCVAR_SERVER, 0.0f, nullptr};

@@ -17,7 +17,7 @@ Requires CMake and an SDK directory containing `cssdk/` and `metamod/`:
 Point `FASTDL_MM_SDK_ROOT` at the directory holding both.
 
 Nothing ReGameDLL- or ReHLDS-specific is used at runtime: the plugin hooks only
-`GameInit` and `StartFrame` and calls stock engine functions, so it runs on an
+`GameInit`, `ServerActivate` and `StartFrame` and calls stock engine functions, so it runs on an
 unmodified HLDS with standard Metamod.
 
 ### Windows
@@ -82,7 +82,7 @@ fastdl_bind              "0.0.0.0"
 fastdl_port              "0"
 fastdl_root              "cstrike"
 fastdl_serve_dirs        "sprites,sound,sounds,overviews,models,maps,gfx"
-fastdl_serve_types       "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2"
+fastdl_serve_types       "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,bz2"
 fastdl_max_file_mb       "250"
 fastdl_threads           "1"
 fastdl_log               "logs/fastdl/fastdl.log"
@@ -107,3 +107,18 @@ fastdl_unblock <ip>
 * `.wad` files directly in `fastdl_root` are also served if `wad` is in `fastdl_serve_types`.
 * File names are matched case-insensitively on Linux too.
 * `sv_downloadurl` is checked against the fastdl port on start, on map change and in `fastdl_status`.
+
+## Gzip
+
+Clients that accept gzip get `<file>.gz` instead of `<file>` when the `.gz` has the same
+modification time (to the second) as the original and its gzip trailer matches the original's size.
+Otherwise the original is served. `.gz` files are not served by name unless `gz` is in `fastdl_serve_types`.
+
+Create or refresh the `.gz` files after adding or changing content:
+
+```text
+python tools/gzip_assets.py cstrike
+perl tools/gzip_assets.pl cstrike
+```
+
+Options: `--dirs`, `--types`, `--min-saving` (percent, default 5).

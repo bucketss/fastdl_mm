@@ -177,15 +177,15 @@ ResolvedFile PathResolver::resolve(const char* rawUrl, std::uint64_t maxBytes) c
     }
 
     // Canonical path, not the requested one: a junction inside a served
-    // directory could otherwise reach one that is not. Requiring a directory
-    // and a file refuses root-level files.
+    // directory could otherwise reach one that is not.
     const auto parts = componentsUnder(root_, candidate);
-    if (parts.size() < 2 || !allowedDirectory(parts.front())) {
+    result.extension = lowerAscii(candidate.extension().u8string());
+    const bool rootWad = parts.size() == 1 && result.extension == ".wad";
+    if (!rootWad && (parts.size() < 2 || !allowedDirectory(parts.front()))) {
         result.status = ResolveStatus::DirectoryDenied;
         return result;
     }
 
-    result.extension = lowerAscii(candidate.extension().u8string());
     if (!allowedExtension(result.extension)) {
         result.status = ResolveStatus::ExtensionDenied;
         return result;

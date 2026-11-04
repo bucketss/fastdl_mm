@@ -115,6 +115,7 @@ int main() {
     touch(root / "addons/config.txt", "private");
     touch(root / "liblist.gam", "top level");
     touch(root / "top.txt", "top level");
+    touch(root / "custom.wad", "wad");
 
     const std::string types = "bsp,nav,res,wad,mdl,spr,wav,mp3,bmp,tga,txt,htm,html,gz,bz2";
 
@@ -171,6 +172,8 @@ int main() {
         ResolveStatus::DirectoryDenied, "deny root-level file");
     check(resolver.resolve("/top.txt", 1024).status ==
         ResolveStatus::DirectoryDenied, "deny root-level file with allowed type");
+    check(resolver.resolve("/custom.wad", 1024).status == ResolveStatus::Ok,
+        "serve root-level wad");
 #ifdef _WIN32
     check(resolver.resolve("/MAPS/test.bsp", 1024).status == ResolveStatus::Ok,
         "directory match is case insensitive");
@@ -188,6 +191,8 @@ int main() {
         "narrow list allows its one type");
     check(narrow.resolve("/maps/test.bsp.bz2", 1024).status ==
         ResolveStatus::ExtensionDenied, "narrow list denies everything else");
+    check(narrow.resolve("/custom.wad", 1024).status == ResolveStatus::ExtensionDenied,
+        "root-level wad still needs wad in the type list");
 
     // Dotted entries and "*" wildcards.
     PathResolver dotted;

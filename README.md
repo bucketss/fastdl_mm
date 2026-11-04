@@ -103,3 +103,4 @@ fastdl_unblock <ip>
 
 * Only `GET` and `HEAD` requests from the Steam downloader are served.
 * Files must match both `fastdl_serve_dirs` and `fastdl_serve_types`.
+* `.wad` files directly in `fastdl_root` are also served if `wad` is in `fastdl_serve_types`.

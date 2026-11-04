@@ -50,6 +50,20 @@ Output:
 build/fastdl_mm_i386.so
 ```
 
+A build made this way only loads on systems with the same or newer glibc. For a
+build that loads on glibc 2.17 and newer (Debian 8+, CentOS 7+), use the
+manylinux2014 container (needs podman or docker):
+
+```sh
+tools/build_manylinux.sh
+```
+
+Output:
+
+```text
+build/manylinux/fastdl_mm_i386.so
+```
+
 ## Install
 
 Copy the plugin and configuration file:

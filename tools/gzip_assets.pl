@@ -9,11 +9,15 @@ use IO::Compress::Gzip qw(gzip $GzipError);
 my $dirs = 'sprites,sound,sounds,overviews,models,maps,gfx';
 my $types = 'bsp,nav,res,wad,mdl,spr,wav,bmp,tga,txt,htm,html';
 my $min_saving = 5.0;
+my $cleanup = 0;
+Getopt::Long::Configure('bundling');
 GetOptions(
     'dirs=s'       => \$dirs,
     'types=s'      => \$types,
     'min-saving=f' => \$min_saving,
-) && @ARGV == 1 or die "usage: $0 ROOT [--dirs LIST] [--types LIST] [--min-saving PERCENT]\n";
+    'cleanup|c'    => \$cleanup,
+) && @ARGV == 1
+    or die "usage: $0 ROOT [--dirs LIST] [--types LIST] [--min-saving PERCENT] [-c|--cleanup]\n";
 my $root = $ARGV[0];
 
 sub split_list {
@@ -34,21 +38,44 @@ sub extension {
     return $name =~ /\.([^.\/\\]+)$/ ? lc $1 : '';
 }
 
-my @sources;
+my @files;
 opendir(my $dh, $root) or die "cannot open $root: $!\n";
 for my $name (sort readdir $dh) {
     next if $name eq '.' || $name eq '..';
     my $path = File::Spec->catfile($root, $name);
-    if (-f $path && extension($name) eq 'wad' && $type_set->{wad}) {
-        push @sources, $path;
+    if (-f $path) {
+        push @files, [$path, 1];
     } elsif (-d $path && $dir_set->{lc $name}) {
         find({ no_chdir => 1, wanted => sub {
-            push @sources, $File::Find::name
-                if -f $File::Find::name && $type_set->{extension($File::Find::name)};
+            push @files, [$File::Find::name, 0] if -f $File::Find::name;
         } }, $path);
     }
 }
 closedir $dh;
+
+sub wanted_type {
+    my ($path, $top) = @_;
+    my $ext = extension($path);
+    return $type_set->{$ext} && (!$top || $ext eq 'wad');
+}
+
+my @sources = map { $_->[0] } grep { wanted_type(@$_) } @files;
+
+if ($cleanup) {
+    my $removed = 0;
+    for my $file (@files) {
+        my ($path, $top) = @$file;
+        my $orphan = $path =~ /\.gz\.tmp$/;
+        if (!$orphan && $path =~ /^(.*)\.gz$/) {
+            $orphan = wanted_type($1, $top) && !-e $1;
+        }
+        next unless $orphan;
+        unlink $path or die "cannot remove $path: $!\n";
+        $removed++;
+        print "removed $path\n";
+    }
+    print "removed $removed orphaned files\n";
+}
 
 sub current {
     my ($source, $target) = @_;

@@ -12,16 +12,39 @@ def split_list(value):
     return {item.strip().lower().lstrip(".") for item in value.split(",") if item.strip()}
 
 
-def sources(root, dirs, types):
+def extension(name):
+    return os.path.splitext(name)[1].lower().lstrip(".")
+
+
+def files(root, dirs):
     with os.scandir(root) as entries:
         for entry in entries:
-            if entry.is_file() and entry.name.lower().endswith(".wad") and "wad" in types:
-                yield entry.path
+            if entry.is_file():
+                yield entry.path, True
             elif entry.is_dir() and entry.name.lower() in dirs:
-                for base, _, files in os.walk(entry.path):
-                    for name in files:
-                        if os.path.splitext(name)[1].lower().lstrip(".") in types:
-                            yield os.path.join(base, name)
+                for base, _, names in os.walk(entry.path):
+                    for name in names:
+                        yield os.path.join(base, name), False
+
+
+def sources(root, dirs, types):
+    for path, top in files(root, dirs):
+        ext = extension(path)
+        if ext in types and (not top or ext == "wad"):
+            yield path
+
+
+def orphans(root, dirs, types):
+    for path, top in files(root, dirs):
+        if path.endswith(".gz.tmp"):
+            yield path
+            continue
+        if not path.endswith(".gz"):
+            continue
+        source = path[:-3]
+        ext = extension(source)
+        if ext in types and (not top or ext == "wad") and not os.path.exists(source):
+            yield path
 
 
 def current(source, target):
@@ -44,12 +67,22 @@ def main():
     parser.add_argument("--types", default=DEFAULT_TYPES)
     parser.add_argument("--min-saving", type=float, default=5.0,
                         help="percent; smaller savings are not written")
+    parser.add_argument("-c", "--cleanup", action="store_true",
+                        help="delete .gz files whose source no longer exists")
     args = parser.parse_args()
 
     dirs = split_list(args.dirs)
     types = split_list(args.types)
     written = kept = skipped = 0
     before = after = 0
+
+    if args.cleanup:
+        removed = 0
+        for path in list(orphans(args.root, dirs, types)):
+            os.remove(path)
+            removed += 1
+            print(f"removed {path}")
+        print(f"removed {removed} orphaned files")
 
     for source in sources(args.root, dirs, types):
         target = source + ".gz"

@@ -135,4 +135,5 @@ python tools/gzip_assets.py cstrike
 perl tools/gzip_assets.pl cstrike
 ```
 
-Options: `--dirs`, `--types`, `--min-saving` (percent, default 5).
+Options: `--dirs`, `--types`, `--min-saving` (percent, default 5), `-c`/`--cleanup`
+(delete `.gz` files whose original no longer exists).

@@ -43,6 +43,9 @@ private:
         const std::filesystem::path& root, const std::filesystem::path& candidate);
     bool allowedDirectory(const std::string& name) const;
     bool allowedExtension(const std::string& extension) const;
+#ifndef _WIN32
+    bool foldCase(const std::filesystem::path& relative, std::filesystem::path& folded) const;
+#endif
 
     std::filesystem::path root_;
     std::vector<std::string> dirs_;

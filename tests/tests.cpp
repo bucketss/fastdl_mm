@@ -174,14 +174,30 @@ int main() {
         ResolveStatus::DirectoryDenied, "deny root-level file with allowed type");
     check(resolver.resolve("/custom.wad", 1024).status == ResolveStatus::Ok,
         "serve root-level wad");
-#ifdef _WIN32
     check(resolver.resolve("/MAPS/test.bsp", 1024).status == ResolveStatus::Ok,
         "directory match is case insensitive");
+    check(resolver.resolve("/maps/TEST.BSP", 1024).status == ResolveStatus::Ok,
+        "file match is case insensitive");
+    check(resolver.resolve("/Custom.WAD", 1024).status == ResolveStatus::Ok,
+        "root-level wad match is case insensitive");
+    check(resolver.resolve("/maps/test.bsp/x.bsp", 1024).status == ResolveStatus::NotFound,
+        "path through a file is a miss, not an error");
+    check(resolver.resolve(("/maps/" + std::string(255, 'a') + "/" +
+        std::string(255, 'b') + "/x.bsp").c_str(), 1024).status == ResolveStatus::NotFound,
+        "overlong path is a miss, not an error");
+#ifdef _WIN32
+    for (const char* name : {"/maps/a*b.bsp", "/maps/a<b.bsp", "/maps/a>b.bsp",
+             "/maps/a|b.bsp", "/maps/a\"b.bsp"}) {
+        check(resolver.resolve(name, 1024).status == ResolveStatus::NotFound,
+            "name invalid on Windows is a miss, not an error");
+    }
 #else
-    // Case sensitive filesystem: the miss happens at canonical(), before the
-    // allowlist is consulted.
-    check(resolver.resolve("/MAPS/test.bsp", 1024).status == ResolveStatus::NotFound,
-        "case-mismatched directory does not resolve");
+    touch(root / "maps/dup.bsp", "lower");
+    touch(root / "maps/DUP.bsp", "upper");
+    check(resolver.resolve("/maps/dup.bsp", 1024).status == ResolveStatus::Ok,
+        "exact case wins over variants");
+    check(resolver.resolve("/maps/Dup.bsp", 1024).status == ResolveStatus::NotFound,
+        "ambiguous case variants do not resolve");
 #endif
 
     // Type allowlist is driven by the list, not a hardcoded table.
@@ -267,6 +283,12 @@ int main() {
     check(!limiter.blocked("127.0.0.2"), "first denial does not block");
     limiter.recordDenial("127.0.0.2", 2, 180);
     check(limiter.blocked("127.0.0.2"), "denial threshold blocks");
+    {
+        const auto list = limiter.blockedClients();
+        check(list.size() == 1 && list.front().ip == "127.0.0.2" &&
+            list.front().secondsLeft > 170 && list.front().secondsLeft <= 180,
+            "blocked list names the client and time left");
+    }
     check(limiter.unblock("127.0.0.2"), "explicit unblock");
     check(!limiter.blocked("127.0.0.2"), "unblocked client stays clear");
 
@@ -405,7 +427,17 @@ int main() {
             // one below it, which must stay a miss.
             check(rawStatus(config.port, "GET /models/momoko/shu HTTP/1.1") == 404,
                 "the truncated name is still not a file");
+            check(rawStatus(config.port, "GET /addons/config.txt HTTP/1.1") == 403,
+                "unserved directory is denied");
             server.stop();
+            const auto stats = server.stats();
+            check(stats.requests == 5, "every request is counted");
+            check(stats.served == 3, "served files are counted");
+            check(stats.notFound == 1, "misses are counted");
+            check(stats.denied == 1, "denials are counted");
+            check(stats.errors == 0, "no errors counted");
+            check(stats.bytesSent == 3 + 5 + 5, "sent bytes are counted");
+            check(stats.connections == 0, "closed connections are uncounted");
         }
     }
 

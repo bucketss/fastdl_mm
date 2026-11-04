@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -28,6 +29,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_set>
+#include <vector>
 
 #ifndef FASTDL_MM_VERSION
 #define FASTDL_MM_VERSION "dev"
@@ -44,6 +46,9 @@ FastdlServer g_server;
 bool g_registered = false;
 bool g_startPending = false;
 std::filesystem::path g_baseDir;
+std::filesystem::path g_configPath;
+std::string g_checkedUrl;
+float g_urlCheckAt = 0.0f;
 
 cvar_t cvarEnabled = {"fastdl_enabled", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarBind = {"fastdl_bind", "0.0.0.0", FCVAR_SERVER, 0.0f, nullptr};
@@ -89,6 +94,7 @@ const Setting g_settings[] = {
 
 unsigned int boundedUnsigned(const char* name, unsigned int minimum, unsigned int maximum) {
     const float value = g_engfuncs.pfnCVarGetFloat(name);
+    if (!std::isfinite(value)) return minimum;
     return static_cast<unsigned int>(std::clamp(value,
         static_cast<float>(minimum), static_cast<float>(maximum)));
 }
@@ -186,6 +192,63 @@ void warnIfDownloadUrlSet() {
         ") - clients will stall on it before falling back");
 }
 
+std::vector<std::string> downloadUrlProblems(const std::string& url, unsigned int port) {
+    std::vector<std::string> problems;
+    if (url.empty()) {
+        problems.push_back("sv_downloadurl is empty - clients will use slow download");
+        return problems;
+    }
+    const auto lower = lowerAscii(url);
+    unsigned int defaultPort = 80;
+    std::size_t authorityStart = 0;
+    if (lower.rfind("http://", 0) == 0) {
+        authorityStart = 7;
+    } else if (lower.rfind("https://", 0) == 0) {
+        authorityStart = 8;
+        defaultPort = 443;
+        problems.push_back("sv_downloadurl uses https, this plugin serves plain http");
+    } else {
+        problems.push_back("sv_downloadurl does not start with http://");
+        return problems;
+    }
+    const auto slash = url.find('/', authorityStart);
+    const auto authority = url.substr(authorityStart,
+        slash == std::string::npos ? std::string::npos : slash - authorityStart);
+    const auto path = slash == std::string::npos ? std::string() : url.substr(slash);
+    unsigned int urlPort = defaultPort;
+    const auto colon = authority.rfind(':');
+    if (colon != std::string::npos) {
+        const auto digits = authority.substr(colon + 1);
+        if (digits.empty() || digits.size() > 5 ||
+            !std::all_of(digits.begin(), digits.end(),
+                [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            problems.push_back("sv_downloadurl has an invalid port");
+            return problems;
+        }
+        urlPort = static_cast<unsigned int>(std::stoul(digits));
+    }
+    if (urlPort != port) {
+        problems.push_back("sv_downloadurl points at port " + std::to_string(urlPort) +
+            ", fastdl listens on " + std::to_string(port));
+    }
+    if (path.find_first_not_of('/') != std::string::npos) {
+        problems.push_back("sv_downloadurl has a path (" + path +
+            "), fastdl serves fastdl_root at /");
+    }
+    return problems;
+}
+
+void checkDownloadUrl() {
+    const std::string url = g_engfuncs.pfnCVarGetString("sv_downloadurl");
+    g_checkedUrl = url;
+    const auto problems = downloadUrlProblems(url, g_server.config().port);
+    if (problems.empty()) {
+        print("sv_downloadurl " + url + " matches the fastdl port");
+        return;
+    }
+    for (const auto& problem : problems) print("WARNING: " + problem);
+}
+
 void printLogState() {
     if (!g_server.logging()) {
         print("NOT logging: could not open " + g_server.logPath().u8string() +
@@ -219,11 +282,33 @@ void startServer() {
         ", root=" + g_server.root().u8string());
     print("serving " + config.serveDirs);
     printLogState();
+    g_urlCheckAt = gpGlobals->time + 5.0f;
 }
+
+void applyConfigFile();
 
 void commandRestart() {
     print("restarting");
+    applyConfigFile();
     startServer();
+}
+
+std::string megabytes(std::uint64_t bytes) {
+    std::ostringstream value;
+    value << std::fixed << std::setprecision(1)
+          << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << " MB";
+    return value.str();
+}
+
+void commandBlocked() {
+    const auto blocked = g_server.blocked();
+    if (blocked.empty()) {
+        print("no blocked IPs");
+        return;
+    }
+    for (const auto& block : blocked) {
+        print(block.ip + " blocked for " + std::to_string(block.secondsLeft) + "s");
+    }
 }
 
 void commandStatus() {
@@ -241,7 +326,17 @@ void commandStatus() {
         ", req/min=" + std::to_string(config.requestsPerMinute) +
         ", denials/min=" + std::to_string(config.denialsPerMinute) +
         ", block=" + std::to_string(config.blockSeconds) + "s");
+    const auto stats = g_server.stats();
+    print("connections=" + std::to_string(stats.connections) +
+        ", requests=" + std::to_string(stats.requests) +
+        ", served=" + std::to_string(stats.served) +
+        ", 404=" + std::to_string(stats.notFound) +
+        ", denied=" + std::to_string(stats.denied) +
+        ", errors=" + std::to_string(stats.errors) +
+        ", sent=" + megabytes(stats.bytesSent) +
+        ", blocked=" + std::to_string(g_server.blocked().size()));
     printLogState();
+    checkDownloadUrl();
 }
 
 void commandUnblock() {
@@ -338,41 +433,46 @@ bool loadConfigFile(const std::filesystem::path& path, unsigned int& loaded,
     return true;
 }
 
+void applyConfigFile() {
+    print("loading config " + g_configPath.generic_u8string());
+    unsigned int loaded = 0;
+    unsigned int skipped = 0;
+    std::string configError;
+    if (!loadConfigFile(g_configPath, loaded, skipped, configError)) {
+        print("config error: " + configError);
+        return;
+    }
+    print("config applied: " + std::to_string(loaded) + " settings" +
+        (skipped != 0 ? ", " + std::to_string(skipped) + " skipped" : "") +
+        ", port=" + std::string(g_engfuncs.pfnCVarGetString("fastdl_port")) +
+        ", root=" + g_engfuncs.pfnCVarGetString("fastdl_root"));
+}
+
 void registerPlugin() {
     if (g_registered) return;
     for (const auto& setting : g_settings) g_engfuncs.pfnCVarRegister(setting.cvar);
     g_engfuncs.pfnAddServerCommand("fastdl_restart", &commandRestart);
     g_engfuncs.pfnAddServerCommand("fastdl_status", &commandStatus);
     g_engfuncs.pfnAddServerCommand("fastdl_unblock", &commandUnblock);
+    g_engfuncs.pfnAddServerCommand("fastdl_blocked", &commandBlocked);
     g_baseDir = resolveBaseDir();
     print("base directory " + g_baseDir.u8string());
     const char* pluginPath =
         gpMetaUtilFuncs != nullptr ? gpMetaUtilFuncs->pfnGetPluginPath(PLID) : nullptr;
-    const std::filesystem::path configPath =
+    g_configPath =
         std::filesystem::u8path(pluginPath ? pluginPath : "addons/fastdl/fastdl_mm.dll")
             .parent_path() / "fastdl_mm.cfg";
-    print("loading config " + configPath.generic_u8string());
     // Only when genuinely absent: a file we cannot stat is never overwritten.
     std::error_code existsError;
-    if (!std::filesystem::exists(configPath, existsError) && !existsError) {
+    if (!std::filesystem::exists(g_configPath, existsError) && !existsError) {
         std::string writeError;
-        if (writeDefaultConfig(configPath, writeError)) {
+        if (writeDefaultConfig(g_configPath, writeError)) {
             print("no config found, wrote defaults");
         } else {
             print("no config found and " + writeError);
         }
     }
-    unsigned int loaded = 0;
-    unsigned int skipped = 0;
-    std::string configError;
-    if (!loadConfigFile(configPath, loaded, skipped, configError)) {
-        print("config error: " + configError);
-    } else {
-        print("config applied: " + std::to_string(loaded) + " settings" +
-        (skipped != 0 ? ", " + std::to_string(skipped) + " skipped" : "") +
-        ", port=" + std::string(g_engfuncs.pfnCVarGetString("fastdl_port")) +
-        ", root=" + g_engfuncs.pfnCVarGetString("fastdl_root"));
-    }
+    applyConfigFile();
     g_registered = true;
     g_startPending = true;
 }
@@ -387,6 +487,18 @@ void startFrame() {
         g_startPending = false;
         startServer();
     }
+    if (g_urlCheckAt > 0.0f && gpGlobals->time >= g_urlCheckAt) {
+        g_urlCheckAt = 0.0f;
+        if (g_server.running()) checkDownloadUrl();
+    }
+    gpMetaGlobals->mres = MRES_IGNORED;
+}
+
+void serverActivate(edict_t*, int, int) {
+    if (g_server.running() && g_urlCheckAt == 0.0f &&
+        g_engfuncs.pfnCVarGetString("sv_downloadurl") != g_checkedUrl) {
+        checkDownloadUrl();
+    }
     gpMetaGlobals->mres = MRES_IGNORED;
 }
 
@@ -400,6 +512,7 @@ int getEntityApi2(DLL_FUNCTIONS* table, int* version) {
     }
     functions.pfnGameInit = &gameInit;
     functions.pfnStartFrame = &startFrame;
+    functions.pfnServerActivate = &serverActivate;
     std::memcpy(table, &functions, sizeof(functions));
     return TRUE;
 }

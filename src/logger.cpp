@@ -191,7 +191,7 @@ void AsyncLogger::run() {
         }
 
         const std::tm today = localNow();
-        if (!opened || !sameDay(today, openDay)) {
+        if (!opened || !output || !sameDay(today, openDay)) {
             output.close();
             output.clear();
             output.open(dailyPath(today), std::ios::app);
@@ -218,5 +218,9 @@ void AsyncLogger::run() {
             output << line << '\n';
         }
         output.flush();
+        if (!output) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            dropped_ += batch.size();
+        }
     }
 }

@@ -5,9 +5,16 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class RateLimiter {
 public:
+    struct Block {
+        std::string ip;
+        long long secondsLeft;
+    };
+
+    std::vector<Block> blockedClients();
     bool blocked(const std::string& ip);
     bool requestExceeded(const std::string& ip, unsigned int limit);
     void recordDenial(const std::string& ip, unsigned int limit, unsigned int blockSeconds);

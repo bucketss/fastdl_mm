@@ -60,6 +60,18 @@ void RateLimiter::recordDenial(
     }
 }
 
+std::vector<RateLimiter::Block> RateLimiter::blockedClients() {
+    const auto now = Clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Block> result;
+    for (const auto& [ip, client] : clients_) {
+        if (client.blockedUntil <= now) continue;
+        const auto left = std::chrono::ceil<std::chrono::seconds>(client.blockedUntil - now);
+        result.push_back({ip, static_cast<long long>(left.count())});
+    }
+    return result;
+}
+
 bool RateLimiter::unblock(const std::string& ip) {
     std::lock_guard<std::mutex> lock(mutex_);
     return clients_.erase(ip) != 0;

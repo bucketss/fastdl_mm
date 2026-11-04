@@ -20,7 +20,41 @@ bool componentEqual(const std::filesystem::path& left, const std::filesystem::pa
     return left == right;
 #endif
 }
+
+bool missing(const std::error_code& ec) {
+    return ec == std::errc::no_such_file_or_directory ||
+        ec == std::errc::not_a_directory ||
+        ec == std::errc::filename_too_long ||
+        ec == std::errc::invalid_argument ||
+        ec == std::errc::too_many_symbolic_link_levels;
+}
 } // namespace
+
+#ifndef _WIN32
+bool PathResolver::foldCase(
+    const std::filesystem::path& relative, std::filesystem::path& folded) const {
+    folded = root_;
+    for (const auto& component : relative) {
+        std::error_code ec;
+        const auto exact = folded / component;
+        if (std::filesystem::exists(std::filesystem::symlink_status(exact, ec))) {
+            folded = exact;
+            continue;
+        }
+        const auto wanted = lowerAscii(component.u8string());
+        std::filesystem::path match;
+        for (std::filesystem::directory_iterator it(folded, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            if (lowerAscii(it->path().filename().u8string()) != wanted) continue;
+            if (!match.empty()) return false;
+            match = it->path();
+        }
+        if (ec || match.empty()) return false;
+        folded = match;
+    }
+    return true;
+}
+#endif
 
 std::vector<std::string> PathResolver::splitList(const std::string& value) {
     std::vector<std::string> items;
@@ -154,10 +188,18 @@ ResolvedFile PathResolver::resolve(const char* rawUrl, std::uint64_t maxBytes) c
     if (!validate(rawUrl, relative)) return result;
 
     std::error_code ec;
-    const auto candidate = std::filesystem::canonical(root_ / relative, ec);
+    auto candidate = std::filesystem::canonical(root_ / relative, ec);
+#ifndef _WIN32
+    if (ec == std::errc::no_such_file_or_directory) {
+        std::filesystem::path folded;
+        if (foldCase(relative, folded)) {
+            ec.clear();
+            candidate = std::filesystem::canonical(folded, ec);
+        }
+    }
+#endif
     if (ec) {
-        result.status = ec == std::errc::no_such_file_or_directory
-            ? ResolveStatus::NotFound : ResolveStatus::IoError;
+        result.status = missing(ec) ? ResolveStatus::NotFound : ResolveStatus::IoError;
         return result;
     }
     if (!containedBy(root_, candidate)) {

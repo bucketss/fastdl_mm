@@ -7,6 +7,7 @@
 #include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <new>
 #include <sstream>
 
 #ifdef _WIN32
@@ -68,15 +69,10 @@ std::filesystem::path resolveAgainstBase(
 // 2 GiB ceiling MHD's 32-bit lseek would otherwise impose.
 constexpr std::size_t kFileBlockSize = 64 * 1024;
 
-// The descriptor rides in the callback closure; there is nothing else to own,
-// so this avoids an allocation that would need its own failure path.
-int readerFd(void* cls) {
-    return static_cast<int>(reinterpret_cast<std::intptr_t>(cls));
-}
-
-void* fdAsCls(int fd) {
-    return reinterpret_cast<void*>(static_cast<std::intptr_t>(fd));
-}
+struct Transfer {
+    int fd;
+    RequestState* state;
+};
 
 void closeFd(int fd) {
 #ifdef _WIN32
@@ -87,7 +83,8 @@ void closeFd(int fd) {
 }
 
 ssize_t fileReader(void* cls, std::uint64_t pos, char* buf, std::size_t max) {
-    const int fd = readerFd(cls);
+    auto* transfer = static_cast<Transfer*>(cls);
+    const int fd = transfer->fd;
 #ifdef _WIN32
     if (_lseeki64(fd, static_cast<__int64>(pos), SEEK_SET) < 0) {
         return static_cast<ssize_t>(MHD_CONTENT_READER_END_WITH_ERROR);
@@ -101,11 +98,14 @@ ssize_t fileReader(void* cls, std::uint64_t pos, char* buf, std::size_t max) {
 #endif
     if (count == 0) return static_cast<ssize_t>(MHD_CONTENT_READER_END_OF_STREAM);
     if (count < 0) return static_cast<ssize_t>(MHD_CONTENT_READER_END_WITH_ERROR);
+    transfer->state->sent += static_cast<std::uint64_t>(count);
     return static_cast<ssize_t>(count);
 }
 
 void fileReaderFree(void* cls) {
-    closeFd(readerFd(cls));
+    auto* transfer = static_cast<Transfer*>(cls);
+    closeFd(transfer->fd);
+    delete transfer;
 }
 
 // Own stream so the formatting flags do not leak into the rest of the line.
@@ -134,6 +134,10 @@ bool FastdlServer::start(const FastdlConfig& config, std::string& error) {
     // warns and disables logging rather than taking the whole server down.
     logBase_ = resolveAgainstBase(config_.baseDir, config_.logPath);
     logging_ = logger_.start(logBase_, config_.logAgeDays);
+    for (auto* counter : {&requests_, &served_, &notFound_, &denied_, &errors_, &bytesSent_}) {
+        counter->store(0);
+    }
+    connections_.store(0);
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -161,6 +165,7 @@ bool FastdlServer::start(const FastdlConfig& config, std::string& error) {
         MHD_OPTION_CONNECTION_TIMEOUT, 60U,
         MHD_OPTION_CONNECTION_MEMORY_LIMIT, static_cast<size_t>(64 * 1024),
         MHD_OPTION_NOTIFY_COMPLETED, &FastdlServer::requestCompleted, this,
+        MHD_OPTION_NOTIFY_CONNECTION, &FastdlServer::connectionChanged, this,
         MHD_OPTION_END);
     if (daemon_ == nullptr) {
         logger_.stop();
@@ -219,6 +224,7 @@ void FastdlServer::requestCompleted(void* cls, MHD_Connection*, void** requestCo
         // frame is not, and the state still has to be freed either way.
         try {
             if (server != nullptr && state->handled) {
+                server->count(*state);
                 server->logCompleted(*state, terminationCode);
             }
         } catch (...) {
@@ -226,6 +232,42 @@ void FastdlServer::requestCompleted(void* cls, MHD_Connection*, void** requestCo
         delete state;
     }
     *requestContext = nullptr;
+}
+
+void FastdlServer::connectionChanged(void* cls, MHD_Connection*, void**,
+    MHD_ConnectionNotificationCode code) {
+    auto* server = static_cast<FastdlServer*>(cls);
+    if (code == MHD_CONNECTION_NOTIFY_STARTED) {
+        server->connections_.fetch_add(1);
+    } else if (code == MHD_CONNECTION_NOTIFY_CLOSED) {
+        server->connections_.fetch_sub(1);
+    }
+}
+
+void FastdlServer::count(const RequestState& state) {
+    requests_.fetch_add(1);
+    if (state.file) bytesSent_.fetch_add(state.sent);
+    if (state.status == MHD_HTTP_OK) {
+        served_.fetch_add(1);
+    } else if (state.status == MHD_HTTP_NOT_FOUND) {
+        notFound_.fetch_add(1);
+    } else if (state.status == MHD_HTTP_FORBIDDEN) {
+        denied_.fetch_add(1);
+    } else {
+        errors_.fetch_add(1);
+    }
+}
+
+ServerStats FastdlServer::stats() const {
+    ServerStats result;
+    result.requests = requests_.load();
+    result.served = served_.load();
+    result.notFound = notFound_.load();
+    result.denied = denied_.load();
+    result.errors = errors_.load();
+    result.bytesSent = bytesSent_.load();
+    result.connections = connections_.load();
+    return result;
 }
 
 int FastdlServer::dispatch(MHD_Connection* connection, RequestState& state) {
@@ -271,11 +313,12 @@ int FastdlServer::dispatch(MHD_Connection* connection, RequestState& state) {
             return deny(connection, state, "invalid path", true);
     }
 
-    const int queued = serveFile(connection, file);
+    const int queued = serveFile(connection, state, file);
     if (queued != MHD_YES) {
         return respondText(connection, state, MHD_HTTP_INTERNAL_SERVER_ERROR,
             "500 Internal Server Error\n", "open failed");
     }
+    state.file = true;
     state.status = MHD_HTTP_OK;
     state.size = file.size;
     state.reason.clear();
@@ -306,7 +349,8 @@ int FastdlServer::respondText(MHD_Connection* connection, RequestState& state,
     return result;
 }
 
-int FastdlServer::serveFile(MHD_Connection* connection, const ResolvedFile& file) {
+int FastdlServer::serveFile(
+    MHD_Connection* connection, RequestState& state, const ResolvedFile& file) {
 #ifdef _WIN32
     const int fd = _wopen(file.path.c_str(), _O_RDONLY | _O_BINARY | _O_NOINHERIT);
 #else
@@ -316,10 +360,16 @@ int FastdlServer::serveFile(MHD_Connection* connection, const ResolvedFile& file
 
     // Once the response exists it owns the descriptor: fileReaderFree closes it
     // when the transfer finishes or the connection dies.
+    auto* transfer = new (std::nothrow) Transfer{fd, &state};
+    if (transfer == nullptr) {
+        closeFd(fd);
+        return MHD_NO;
+    }
     MHD_Response* response = MHD_create_response_from_callback(
-        file.size, kFileBlockSize, &fileReader, fdAsCls(fd), &fileReaderFree);
+        file.size, kFileBlockSize, &fileReader, transfer, &fileReaderFree);
     if (response == nullptr) {
         closeFd(fd);
+        delete transfer;
         return MHD_NO;
     }
     MHD_add_response_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, contentType(file.extension));
@@ -391,8 +441,11 @@ void FastdlServer::logCompleted(
 #endif
     std::ostringstream line;
     line << '[' << std::put_time(&local, "%Y-%m-%dT%H:%M:%S") << "] "
-         << state.method << ' ' << state.url << " -> " << state.status
-         << ' ' << kilobytes(state.size) << ' ' << terminationName(code)
+         << state.method << ' ' << state.url << " -> " << state.status << ' ';
+    if (state.file && state.method == MHD_HTTP_METHOD_GET && state.sent != state.size) {
+        line << kilobytes(state.sent) << '/';
+    }
+    line << kilobytes(state.size) << ' ' << terminationName(code)
          << " from " << state.ip << " [" << state.userAgent << ']';
     if (!state.reason.empty()) line << ' ' << state.reason;
     logger_.write(line.str());

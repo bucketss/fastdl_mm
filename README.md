@@ -89,13 +89,14 @@ fastdl_log               "logs/fastdl/fastdl.log"
 fastdl_log_age           "7"
 ```
 
-Use `fastdl_restart` to apply changed cvars without restarting HLDS.
+`fastdl_restart` reloads `fastdl_mm.cfg` and restarts the HTTP server without restarting HLDS.
 
 ## Commands
 
 ```text
 fastdl_status
 fastdl_restart
+fastdl_blocked
 fastdl_unblock <ip>
 ```
 
@@ -104,3 +105,5 @@ fastdl_unblock <ip>
 * Only `GET` and `HEAD` requests from the Steam downloader are served.
 * Files must match both `fastdl_serve_dirs` and `fastdl_serve_types`.
 * `.wad` files directly in `fastdl_root` are also served if `wad` is in `fastdl_serve_types`.
+* File names are matched case-insensitively on Linux too.
+* `sv_downloadurl` is checked against the fastdl port on start, on map change and in `fastdl_status`.

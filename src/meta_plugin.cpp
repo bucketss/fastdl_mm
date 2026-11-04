@@ -49,6 +49,7 @@ std::filesystem::path g_baseDir;
 std::filesystem::path g_configPath;
 std::string g_checkedUrl;
 float g_urlCheckAt = 0.0f;
+bool g_urlCheckChangedOnly = false;
 
 cvar_t cvarEnabled = {"fastdl_enabled", "1", FCVAR_SERVER, 0.0f, nullptr};
 cvar_t cvarBind = {"fastdl_bind", "0.0.0.0", FCVAR_SERVER, 0.0f, nullptr};
@@ -489,15 +490,20 @@ void startFrame() {
     }
     if (g_urlCheckAt > 0.0f && gpGlobals->time >= g_urlCheckAt) {
         g_urlCheckAt = 0.0f;
-        if (g_server.running()) checkDownloadUrl();
+        if (g_server.running() &&
+            (!g_urlCheckChangedOnly ||
+                g_engfuncs.pfnCVarGetString("sv_downloadurl") != g_checkedUrl)) {
+            checkDownloadUrl();
+        }
+        g_urlCheckChangedOnly = false;
     }
     gpMetaGlobals->mres = MRES_IGNORED;
 }
 
 void serverActivate(edict_t*, int, int) {
-    if (g_server.running() && g_urlCheckAt == 0.0f &&
-        g_engfuncs.pfnCVarGetString("sv_downloadurl") != g_checkedUrl) {
-        checkDownloadUrl();
+    if (g_server.running()) {
+        if (g_urlCheckAt == 0.0f) g_urlCheckChangedOnly = true;
+        g_urlCheckAt = gpGlobals->time + 5.0f;
     }
     gpMetaGlobals->mres = MRES_IGNORED;
 }
